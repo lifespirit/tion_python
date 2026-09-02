@@ -5,9 +5,9 @@ import logging
 from bleak.backends.device import BLEDevice
 
 if __package__ == "":
-    from tion_btle.tion import Tion, TionException
+    from tion_btle.tion import ConnectionFactory, Tion, TionException
 else:
-    from .tion import Tion, TionException
+    from .tion import ConnectionFactory, Tion, TionException
 
 logging.basicConfig(level=logging.DEBUG)
 _LOGGER = logging.getLogger(__name__)
@@ -29,8 +29,12 @@ class TionS3(Tion):
     command_REQUEST_PARAMS = 1
     command_SET_PARAMS = 2
 
-    def __init__(self, mac: str | BLEDevice):
-        super().__init__(mac)
+    def __init__(
+        self,
+        mac: str | BLEDevice,
+        connection_factory: ConnectionFactory | None = None,
+    ):
+        super().__init__(mac, connection_factory=connection_factory)
 
         # S3-specific properties
         self._timer: bool = False

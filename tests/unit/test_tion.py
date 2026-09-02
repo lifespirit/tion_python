@@ -181,11 +181,12 @@ async def test_direct_retry_uses_a_fresh_bleak_client():
 
 
 @pytest.mark.asyncio
-async def test_connection_factory_uses_latest_ble_device():
+@pytest.mark.parametrize("instance", [Tion, TionLiteFamily, TionLite, TionS3, TionS4])
+async def test_connection_factory_uses_latest_ble_device(instance):
     client = mock.MagicMock()
     client.is_connected = True
     connection_factory = mock.AsyncMock(return_value=client)
-    t_tion = Tion("old-device", connection_factory=connection_factory)
+    t_tion = instance("old-device", connection_factory=connection_factory)
 
     t_tion.update_btle_device("new-device")
     await t_tion._try_connect()

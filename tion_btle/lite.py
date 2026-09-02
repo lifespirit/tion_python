@@ -5,10 +5,10 @@ import logging
 from bleak.backends.device import BLEDevice
 
 if __package__ == "":
-    from tion_btle.tion import TionException
+    from tion_btle.tion import ConnectionFactory, TionException
     from tion_btle.light_family import TionLiteFamily
 else:
-    from .tion import TionException
+    from .tion import ConnectionFactory, TionException
     from .light_family import TionLiteFamily
 
 logging.basicConfig(level=logging.DEBUG)
@@ -17,8 +17,12 @@ _LOGGER = logging.getLogger(__name__)
 
 class TionLite(TionLiteFamily):
 
-    def __init__(self, mac: str | BLEDevice):
-        super().__init__(mac)
+    def __init__(
+        self,
+        mac: str | BLEDevice,
+        connection_factory: ConnectionFactory | None = None,
+    ):
+        super().__init__(mac, connection_factory=connection_factory)
         self._package_size: bytearray = bytearray()
         self._command_type: bytearray = bytearray()
         self._request_id: bytearray = bytearray()

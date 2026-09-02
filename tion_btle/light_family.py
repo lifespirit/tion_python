@@ -8,9 +8,9 @@ from typing import final, List
 from bleak.backends.device import BLEDevice
 
 if __package__ == "":
-    from tion_btle.tion import Tion
+    from tion_btle.tion import ConnectionFactory, Tion
 else:
-    from .tion import Tion
+    from .tion import ConnectionFactory, Tion
 
 logging.basicConfig(level=logging.DEBUG)
 _LOGGER = logging.getLogger(__name__)
@@ -31,8 +31,12 @@ class TionLiteFamily(Tion):
     END_PACKET_ID = 0xc0
     MAGIC_NUMBER: int = 0x3a  # 58
 
-    def __init__(self, mac: str | BLEDevice):
-        super().__init__(mac)
+    def __init__(
+        self,
+        mac: str | BLEDevice,
+        connection_factory: ConnectionFactory | None = None,
+    ):
+        super().__init__(mac, connection_factory=connection_factory)
         self._data: bytearray = bytearray()
         self._crc: bytearray = bytearray()
         self._header: bytearray = bytearray()
@@ -181,4 +185,3 @@ class TionLiteFamily(Tion):
     def _packages(self) -> list:
         """Packages for tests"""
         raise NotImplementedError()
-
