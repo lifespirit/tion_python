@@ -4,15 +4,19 @@ import abc
 import asyncio
 import inspect
 import logging
+import sys
 from asyncio import Semaphore
-from typing import Callable, List, final
+from collections.abc import Awaitable, Callable
 from time import localtime, strftime
+from typing import List, final
 
 from bleak import BleakClient
 from bleak import exc
 from bleak.backends.device import BLEDevice
 
 _LOGGER = logging.getLogger(__name__)
+
+ConnectionFactory = Callable[[str | BLEDevice], Awaitable[BleakClient]]
 
 
 class MaxTriesExceededError(Exception):
@@ -79,10 +83,16 @@ class Tion:
     uuid_notify: str = ""
     uuid_write: str = ""
 
-    def __init__(self, mac: str | BLEDevice):
+    def __init__(
+        self,
+        mac: str | BLEDevice,
+        connection_factory: ConnectionFactory | None = None,
+    ):
         self._mac = mac
-        self._btle: BleakClient = BleakClient(mac)
-        self._next_btle_device: BleakClient | None = None
+        self._ble_device: str | BLEDevice = mac
+        self._connection_factory = connection_factory
+        self._btle: BleakClient | None = None
+        self._next_btle_device: str | BLEDevice | None = None
         self._delegation = TionDelegation()
         self._fan_speed = 0
         self._model: str = self.__class__.__name__
@@ -285,14 +295,27 @@ class Tion:
     @final
     @property
     def connection_status(self):
-        status = "connected" if self._btle.is_connected else "disc"
+        status = "connected" if self._btle is not None and self._btle.is_connected else "disc"
         return status
 
     @final
-    @retry(retries=1, delay=2)
     async def _try_connect(self) -> bool:
-        """Tries to connect with retries"""
+        """Connect through an injected connector or the default Bleak path."""
         self.set_new_btle_device()
+        if self._connection_factory is not None:
+            self._btle = await self._connection_factory(self._ble_device)
+            if not self._btle.is_connected:
+                raise exc.BleakError("Connection factory returned a disconnected client")
+            return True
+
+        return await self._try_connect_with_bleak()
+
+    @retry(retries=1, delay=2)
+    async def _try_connect_with_bleak(self) -> bool:
+        """Connect directly with Bleak, retrying with a fresh client."""
+        # A disconnected BleakClient must not be reused. Recreating it also
+        # ensures that a newly selected adapter/proxy from BLEDevice is used.
+        self._btle = BleakClient(self._ble_device)
         return await self._btle.connect()
 
     @final
@@ -314,8 +337,15 @@ class Tion:
     @final
     async def _disconnect(self):
         _LOGGER.debug(f"Disconnecting. {self.connection_status=}.")
-        if self.connection_status != "disc":
-            await self._btle.disconnect()
+        client = self._btle
+        try:
+            if client is not None and client.is_connected:
+                await client.disconnect()
+        finally:
+            # Never carry a client across sessions. Bleak and Home Assistant
+            # both expect a fresh client for the next connection attempt.
+            self._btle = None
+            self.__notifications_enabled = False
             async with self._semaphore:
                 self.set_new_btle_device()
 
@@ -325,6 +355,8 @@ class Tion:
     @retry(retries=3)
     async def _try_write(self, request: bytearray):
         _LOGGER.debug(f"Writing {bytes(request).hex()} to {self.uuid_write}, {self.connection_status=}")
+        if self._btle is None:
+            raise exc.BleakError("Cannot write while disconnected")
         return await self._btle.write_gatt_char(
             self.uuid_write,
             request,
@@ -334,8 +366,20 @@ class Tion:
     @final
     async def _enable_notifications(self):
         _LOGGER.debug(f"Enabling notification. {self.connection_status=}")
+        if self._btle is None:
+            raise exc.BleakError("Cannot enable notifications while disconnected")
         try:
-            await self._btle.start_notify(self.uuid_notify, self._delegation.handleNotification)
+            notify_kwargs = {}
+            if sys.platform.startswith("linux"):
+                # Tion can send a notification immediately after the CCCD is
+                # written. BlueZ AcquireNotify can miss that first packet;
+                # StartNotify keeps the subscription ordering deterministic.
+                notify_kwargs["bluez"] = {"use_start_notify": True}
+            await self._btle.start_notify(
+                self.uuid_notify,
+                self._delegation.handleNotification,
+                **notify_kwargs,
+            )
         except exc.BleakError as e:
             _LOGGER.warning("Got exception %s while enabling notifications!" % str(e))
             raise e
@@ -482,6 +526,8 @@ class Tion:
         await self._connect(need_notifications=False)
         _LOGGER.debug("Connected. BT pairing ...")
         try:
+            if self._btle is None:
+                raise exc.BleakError("Cannot pair while disconnected")
             await self._btle.pair()
             # device-specific pairing
             _LOGGER.debug("Device-specific pairing ...")
@@ -579,10 +625,10 @@ class Tion:
     @final
     def set_new_btle_device(self):
         if self._next_btle_device is not None:
-            try:
-                _LOGGER.debug(f"Updating _btle instance from {self._btle} to {self._next_btle_device}")
-            except AttributeError:
-                pass
-
-            self._btle = BleakClient(self._next_btle_device)
+            _LOGGER.debug(
+                "Updating BLE device from %s to %s",
+                self._ble_device,
+                self._next_btle_device,
+            )
+            self._ble_device = self._next_btle_device
             self._next_btle_device = None

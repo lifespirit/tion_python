@@ -72,13 +72,10 @@ jobs:
         pip install -r requirements.txt
         
 
-    - name: Set version
+    - name: Build
       env:
         VERSION: ${{ needs.changes.outputs.tag }}
-      run: sed --in-place -e "s/%%%VERSION%%%/${VERSION##v}/" setup.py
-
-    - name: Build
-      run: python setup.py sdist bdist_wheel
+      run: TION_BTLE_VERSION="${VERSION##v}" python setup.py sdist bdist_wheel
 
     - name: Publish
       env:

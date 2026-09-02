@@ -125,3 +125,98 @@ def test_mac(instance):
     target = 'foo'
     t_tion = instance(target)
     assert t_tion.mac == target
+
+
+@pytest.mark.asyncio
+async def test_new_bleak_client_is_created_for_each_connection():
+    clients = []
+
+    class FakeBleakClient:
+        def __init__(self, device):
+            self.device = device
+            self.is_connected = False
+            clients.append(self)
+
+        async def connect(self):
+            self.is_connected = True
+            return True
+
+        async def disconnect(self):
+            self.is_connected = False
+
+    with mock.patch("tion_btle.tion.BleakClient", FakeBleakClient):
+        t_tion = Tion("foo")
+        await t_tion._try_connect()
+        await t_tion._disconnect()
+        await t_tion._try_connect()
+
+    assert len(clients) == 2
+    assert clients[0] is not clients[1]
+
+
+@pytest.mark.asyncio
+async def test_direct_retry_uses_a_fresh_bleak_client():
+    clients = []
+
+    class FakeBleakClient:
+        def __init__(self, device):
+            self.device = device
+            self.is_connected = False
+            clients.append(self)
+
+        async def connect(self):
+            if len(clients) == 1:
+                raise exc.BleakError("first connection failed")
+            self.is_connected = True
+            return True
+
+    with (
+        mock.patch("tion_btle.tion.BleakClient", FakeBleakClient),
+        mock.patch("tion_btle.tion.asyncio.sleep", new=mock.AsyncMock()),
+    ):
+        await Tion("foo")._try_connect()
+
+    assert len(clients) == 2
+    assert clients[0] is not clients[1]
+
+
+@pytest.mark.asyncio
+async def test_connection_factory_uses_latest_ble_device():
+    client = mock.MagicMock()
+    client.is_connected = True
+    connection_factory = mock.AsyncMock(return_value=client)
+    t_tion = Tion("old-device", connection_factory=connection_factory)
+
+    t_tion.update_btle_device("new-device")
+    await t_tion._try_connect()
+
+    connection_factory.assert_awaited_once_with("new-device")
+
+
+@pytest.mark.asyncio
+async def test_connection_factory_owns_its_retry_policy():
+    connection_factory = mock.AsyncMock(side_effect=exc.BleakError("failed"))
+    t_tion = Tion("device", connection_factory=connection_factory)
+
+    with pytest.raises(exc.BleakError):
+        await t_tion._try_connect()
+
+    connection_factory.assert_awaited_once_with("device")
+
+
+@pytest.mark.asyncio
+async def test_linux_notifications_force_bluez_start_notify():
+    client = mock.MagicMock()
+    client.is_connected = True
+    client.start_notify = mock.AsyncMock()
+    t_tion = Tion("foo")
+    t_tion._btle = client
+
+    with mock.patch("tion_btle.tion.sys.platform", "linux"):
+        await t_tion._enable_notifications()
+
+    client.start_notify.assert_awaited_once_with(
+        t_tion.uuid_notify,
+        t_tion._delegation.handleNotification,
+        bluez={"use_start_notify": True},
+    )

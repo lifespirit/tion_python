@@ -5,16 +5,21 @@ import os
 
 here = os.path.abspath(os.path.dirname(__file__))
 
-req = []
-with open("requirements.txt") as f:
-    req.append(f.read())
+with open(os.path.join(here, "requirements.txt"), encoding="utf-8") as f:
+    requirements = [
+        line.strip()
+        for line in f
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+version = os.environ.get("TION_BTLE_VERSION", "3.3.7.dev0")
 
 setup(
     name='tion_btle',
-    version='%%%VERSION%%%',
+    version=version,
     long_description="Module for working with Tion breezers",
     url='https://github.com/TionAPI/tion_python/tree/dev',
-    install_requires=[req],
+    install_requires=requirements,
     description='Python module for interacting with Tion breezers',
     packages=find_packages(),
 )

@@ -1,7 +1,7 @@
 ![CI tests](https://github.com/TionAPI/tion_python/workflows/CI%20tests/badge.svg?branch=master&event=push)
 
 # About
-This module will allow you to control your Tion S3 or Tion Lite breezer via bluetooth.
+This module will allow you to control your Tion S3, S4 or Tion Lite breezer via Bluetooth.
 
 If you want to use MagicAir API please follow https://github.com/airens/tion
 # Installation
@@ -83,4 +83,15 @@ await device.set({
 To pair device turn breezer to pairing mode and call
 ```python
 await device.pair()
+```
+
+## Connection factory
+
+Integrations that manage Bluetooth adapters or proxies may pass an asynchronous
+`connection_factory` to the constructor. It must accept the current MAC address
+or `BLEDevice` and return an already connected `BleakClient`. A fresh client is
+used for every connection session.
+
+```python
+device = Breezer(ble_device, connection_factory=connect)
 ```
