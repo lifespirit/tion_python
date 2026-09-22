@@ -12,7 +12,7 @@ with open(os.path.join(here, "requirements.txt"), encoding="utf-8") as f:
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
-version = os.environ.get("TION_BTLE_VERSION", "3.3.7.dev0")
+version = os.environ.get("TION_BTLE_VERSION", "3.3.7.dev1")
 
 setup(
     name='tion_btle',
