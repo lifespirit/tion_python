@@ -1,3 +1,4 @@
+import asyncio
 import time
 import pytest
 import unittest.mock as mock
@@ -170,6 +171,9 @@ async def test_direct_retry_uses_a_fresh_bleak_client():
             self.is_connected = True
             return True
 
+        async def disconnect(self):
+            self.is_connected = False
+
     with (
         mock.patch("tion_btle.tion.BleakClient", FakeBleakClient),
         mock.patch("tion_btle.tion.asyncio.sleep", new=mock.AsyncMock()),
@@ -221,3 +225,106 @@ async def test_linux_notifications_force_bluez_start_notify():
         t_tion._delegation.handleNotification,
         bluez={"use_start_notify": True},
     )
+
+
+@pytest.mark.asyncio
+async def test_session_closes_after_failed_notification_setup():
+    client = mock.MagicMock()
+    client.is_connected = True
+    client.disconnect = mock.AsyncMock(side_effect=lambda: setattr(client, "is_connected", False))
+    client.start_notify = mock.AsyncMock(side_effect=exc.BleakError("notify failed"))
+    tion = Tion("foo", connection_factory=mock.AsyncMock(return_value=client))
+
+    with pytest.raises(exc.BleakError, match="notify failed"):
+        async with tion._session():
+            pass
+
+    client.disconnect.assert_awaited_once()
+    assert tion._btle is None
+
+
+@pytest.mark.asyncio
+async def test_failed_disconnect_retains_client_and_blocks_new_connection():
+    old_client = mock.MagicMock()
+    old_client.is_connected = True
+    old_client.disconnect = mock.AsyncMock(side_effect=exc.BleakError("still connected"))
+    factory = mock.AsyncMock(return_value=old_client)
+    tion = Tion("foo", connection_factory=factory)
+
+    with pytest.raises(exc.BleakError, match="still connected"):
+        async with tion._session(need_notifications=False):
+            pass
+    assert tion._btle is old_client
+
+    with pytest.raises(exc.BleakError, match="still connected"):
+        async with tion._session(need_notifications=False):
+            pass
+    factory.assert_awaited_once()
+
+    async def disconnect():
+        old_client.is_connected = False
+
+    old_client.disconnect = mock.AsyncMock(side_effect=disconnect)
+    await tion.close()
+    assert tion._btle is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_disconnect_before_next_session():
+    events = []
+    client = mock.MagicMock()
+    client.is_connected = True
+    disconnect_started = asyncio.Event()
+    allow_disconnect = asyncio.Event()
+
+    async def disconnect():
+        disconnect_started.set()
+        await allow_disconnect.wait()
+        client.is_connected = False
+        events.append("closed")
+
+    client.disconnect = mock.AsyncMock(side_effect=disconnect)
+    tion = Tion("foo", connection_factory=mock.AsyncMock(return_value=client))
+
+    async def operation():
+        async with tion._session(need_notifications=False):
+            await asyncio.Future()
+
+    task = asyncio.create_task(operation())
+    await asyncio.sleep(0)
+    task.cancel()
+    await disconnect_started.wait()
+    assert not task.done()
+    allow_disconnect.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert events == ["closed"]
+    assert tion._btle is None
+
+
+@pytest.mark.asyncio
+async def test_set_uses_one_connect_and_disconnect():
+    client = mock.MagicMock()
+    client.is_connected = True
+
+    async def disconnect():
+        client.is_connected = False
+
+    client.disconnect = mock.AsyncMock(side_effect=disconnect)
+    client.start_notify = mock.AsyncMock()
+    factory = mock.AsyncMock(return_value=client)
+    tion = TionS4("foo", connection_factory=factory)
+
+    async def read_state():
+        tion.have_breezer_state = True
+
+    tion._read_state_connected = mock.AsyncMock(side_effect=read_state)
+    tion._encode_request = mock.MagicMock(return_value=bytearray(b"request"))
+    tion._send_request = mock.AsyncMock()
+    tion._get_data_from_breezer = mock.AsyncMock()
+
+    await tion.set({"fan_speed": 2})
+
+    factory.assert_awaited_once()
+    client.disconnect.assert_awaited_once()
+    tion._read_state_connected.assert_awaited_once()

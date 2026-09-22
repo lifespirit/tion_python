@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import logging
 import sys
+from contextlib import asynccontextmanager
 from asyncio import Semaphore
 from collections.abc import Awaitable, Callable
 from time import localtime, strftime
@@ -115,6 +116,27 @@ class Tion:
         self.have_breezer_state: bool = False
         self._semaphore = Semaphore(1)
 
+    @asynccontextmanager
+    async def _session(self, need_notifications: bool = True):
+        """Own one physical connection for the whole transaction."""
+        async with self._semaphore:
+            self.have_breezer_state = False
+            try:
+                await self._connect(need_notifications=need_notifications)
+                yield
+            finally:
+                # Cleanup also runs if connect, GATT, or the caller is cancelled.
+                close = asyncio.create_task(self._disconnect())
+                try:
+                    await asyncio.shield(close)
+                except asyncio.CancelledError:
+                    # Do not release the lock while disconnect is still running.
+                    await close
+                    raise
+                finally:
+                    self.have_breezer_state = False
+                    self._delegation._data.clear()
+
     @abc.abstractmethod
     async def _send_request(self, request: bytearray):
         """ Send request to device
@@ -195,13 +217,12 @@ class Tion:
         Get current state from breezer
         :return: None
         """
-        try:
-            await self.connect()
-            await self._try_write(request=self.command_getStatus)
-            response = await self._get_data_from_breezer()
-        finally:
-            await self.disconnect()
+        async with self._session():
+            await self._read_state_connected()
 
+    async def _read_state_connected(self) -> None:
+        await self._try_write(request=self.command_getStatus)
+        response = await self._get_data_from_breezer()
         self._decode_response(response)
 
     @final
@@ -254,8 +275,8 @@ class Tion:
         except KeyError:
             pass
 
-        try:
-            await self.connect()
+        async with self._session():
+            await self._read_state_connected()
             current_settings = await self.get(skip_update=True)
 
             merged_settings = {**current_settings, **new_settings}
@@ -265,8 +286,6 @@ class Tion:
             await self._send_request(encoded_request)
             self._set_internal_state_from_request(new_settings)
             await self._get_data_from_breezer()
-        finally:
-            await self.disconnect()
 
     @final
     @property
@@ -298,9 +317,16 @@ class Tion:
         status = "connected" if self._btle is not None and self._btle.is_connected else "disc"
         return status
 
+    @property
+    def has_pending_connection(self) -> bool:
+        """Whether this instance still owns a client requiring teardown."""
+        return self._btle is not None
+
     @final
     async def _try_connect(self) -> bool:
         """Connect through an injected connector or the default Bleak path."""
+        if self._btle is not None:
+            await self._disconnect()
         self.set_new_btle_device()
         if self._connection_factory is not None:
             self._btle = await self._connection_factory(self._ble_device)
@@ -310,17 +336,26 @@ class Tion:
 
         return await self._try_connect_with_bleak()
 
-    @retry(retries=1, delay=2)
     async def _try_connect_with_bleak(self) -> bool:
         """Connect directly with Bleak, retrying with a fresh client."""
-        # A disconnected BleakClient must not be reused. Recreating it also
-        # ensures that a newly selected adapter/proxy from BLEDevice is used.
-        self._btle = BleakClient(self._ble_device)
-        return await self._btle.connect()
+        for attempt in range(2):
+            self._btle = BleakClient(self._ble_device)
+            try:
+                if await self._btle.connect():
+                    return True
+                raise exc.BleakError("BleakClient.connect returned False")
+            except BaseException as error:
+                await self._disconnect()
+                if attempt or isinstance(error, asyncio.CancelledError):
+                    raise
+                await asyncio.sleep(2)
+        raise AssertionError("unreachable")
 
     @final
     async def _connect(self, need_notifications: bool = True):
         _LOGGER.debug(f"Connecting. {self.connection_status=}.")
+        if self._btle is not None and not self._btle.is_connected:
+            await self._disconnect()
         if self.connection_status == "disc":
             try:
                 await self._try_connect()
@@ -338,16 +373,16 @@ class Tion:
     async def _disconnect(self):
         _LOGGER.debug(f"Disconnecting. {self.connection_status=}.")
         client = self._btle
-        try:
-            if client is not None and client.is_connected:
-                await client.disconnect()
-        finally:
-            # Never carry a client across sessions. Bleak and Home Assistant
-            # both expect a fresh client for the next connection attempt.
-            self._btle = None
-            self.__notifications_enabled = False
-            async with self._semaphore:
-                self.set_new_btle_device()
+        if client is not None:
+            # The HA wrapper needs disconnect even when BlueZ reports disconnected.
+            # Retain ownership on any teardown failure; never open over it.
+            await client.disconnect()
+            if client.is_connected:
+                raise exc.BleakError("Client remains connected after disconnect")
+            if self._btle is client:
+                self._btle = None
+        self.__notifications_enabled = False
+        self.set_new_btle_device()
 
         _LOGGER.debug(f"_disconnect done. {self.connection_status=}")
 
@@ -523,22 +558,13 @@ class Tion:
     @final
     async def pair(self):
         _LOGGER.debug("Pairing")
-        await self._connect(need_notifications=False)
-        _LOGGER.debug("Connected. BT pairing ...")
-        try:
-            if self._btle is None:
-                raise exc.BleakError("Cannot pair while disconnected")
-            await self._btle.pair()
-            # device-specific pairing
-            _LOGGER.debug("Device-specific pairing ...")
-            await self._pair()
-            _LOGGER.debug("Device pair is done")
-        except Exception as e:
-            _LOGGER.critical(f"Got exception while pair {type(e).__name__}: {str(e)}")
-            raise TionException('pair', f"{type(e).__name__}: {str(e)}")
-        finally:
-            _LOGGER.debug("disconnected")
-            await self._disconnect()
+        async with self._session(need_notifications=False):
+            try:
+                await self._btle.pair()
+                await self._pair()
+            except Exception as e:
+                _LOGGER.critical("Got exception while pair %s: %s", type(e).__name__, e)
+                raise TionException('pair', f"{type(e).__name__}: {e}") from e
 
     @abc.abstractmethod
     async def _pair(self):
@@ -564,6 +590,14 @@ class Tion:
             self.have_breezer_state = False
             while self._delegation.haveNewData:
                 _LOGGER.debug(f"Cleaning data in disconnect: {self._delegation.data=}")
+
+    async def close(self):
+        """Retry closing a client retained after a failed teardown."""
+        async with self._semaphore:
+            await self._disconnect()
+            self.__connections_count = 0
+            self.have_breezer_state = False
+            self._delegation._data.clear()
 
     @property
     @abc.abstractmethod
