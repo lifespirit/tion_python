@@ -12,13 +12,14 @@ with open(os.path.join(here, "requirements.txt"), encoding="utf-8") as f:
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
-version = os.environ.get("TION_BTLE_VERSION", "3.3.7.dev1")
+version = os.environ.get("TION_BTLE_VERSION", "3.3.7")
 
 setup(
     name='tion_btle',
     version=version,
     long_description="Module for working with Tion breezers",
     url='https://github.com/TionAPI/tion_python/tree/dev',
+    python_requires='>=3.10',
     install_requires=requirements,
     description='Python module for interacting with Tion breezers',
     packages=find_packages(),

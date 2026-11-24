@@ -1,7 +1,7 @@
 name: CI tests
 on: 
   push:
-    branches: [ master, HA2026_fix ]
+    branches: [ master ]
   pull_request:
     branches: [ master ]  
     types: [opened, synchronize]
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ['3.10', '3.12', '3.14']
+        python: ['3.10', '3.11', '3.12', '3.13', '3.14']
         type: [unit]
 
     # Steps represent a sequence of tasks that will be executed as part of the job
